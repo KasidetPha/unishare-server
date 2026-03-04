@@ -56,7 +56,7 @@ app = FastAPI(title="UniShare API")
 # 🟢 ตั้งค่า CORS เพื่ออนุญาตให้ Frontend (React) เรียกใช้ API นี้ได้
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://unishare-it-squad.netlify.app/"], # URL ของ React
+    allow_origins=["https://unishare-it-squad.netlify.app"], # URL ของ React
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
