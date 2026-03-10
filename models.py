@@ -5,7 +5,8 @@ from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
 
-# 🟢 เหลือ User แค่ตัวเดียว (ที่มี hashed_password)
+
+# 🟢 เหลือ User แค่ตัวเดียว (ที่มี hashed_password) และลบฟิลด์ที่ประกาศซ้ำออก
 class User(Base):
     __tablename__ = "users"
 
@@ -14,10 +15,22 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     uni = Column(String)
-    account_type = Column(String)
     role = Column(String, default="user")
-    is_active = Column(Boolean, default=True)
-    verification_document = Column(String, nullable=True)
+    
+    # ฟิลด์สำหรับจัดการศิษย์เก่า
+    account_type = Column(String, default="student") 
+    verification_document = Column(String, nullable=True) 
+    is_active = Column(Boolean, default=True) # สถานะเอาไว้ให้ Admin กดอนุมัติ
+    
+class UserCreate(BaseModel):
+    name: str
+    email: str # หรือใช้ EmailStr ถ้ามีการ import จาก pydantic
+    password: str
+    uni: str
+    
+    # 🟢 เพิ่มตัวแปรให้ตรงกับที่ React ส่งมา
+    account_type: str = "student"
+    verification_document: Optional[str] = None
 
 class Product(Base):
     __tablename__ = "products"
@@ -32,7 +45,6 @@ class Product(Base):
     description = Column(String, nullable=True)
     seller_id = Column(Integer, ForeignKey("users.id"))
     status = Column(String, default="available") # available, reserved, sold
-    
     
 class MessageCreate(BaseModel):
     sender_id: int

@@ -54,9 +54,15 @@ models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="UniShare API")
 
 # 🟢 ตั้งค่า CORS เพื่ออนุญาตให้ Frontend (React) เรียกใช้ API นี้ได้
+origins = [
+    "http://localhost:5173",      # สำหรับ Vite (ที่เห็นในรูปเบราว์เซอร์ของคุณ)
+    "http://127.0.0.1:5173",    # เผื่อไว้สำหรับบางเครื่องที่ชี้ไปที่ IP ตรงๆ
+    "https://unishare-it-squad.netlify.app", # สำหรับตอน Deploy จริงบน Netlify
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://unishare-it-squad.netlify.app"], # URL ของ React
+    allow_origins=origins,       # ใช้ตัวแปร origins ที่รวมทุก URL ไว้แล้ว
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -74,48 +80,48 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     # 1. เช็คอีเมลซ้ำ
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
     if db_user:
-        raise HTTPException(status_code=400, detail="อีเมลนี้มีในระบบแล้วครับ")
+        raise HTTPException(status_code=400, detail="อีเมลนี้มีในระบบแล้ว")
     
     # 2. เข้ารหัสผ่าน
     hashed_pwd = auth_utils.hash_password(user.password)
     
-    # 3. กำหนดสถานะการเปิดใช้งาน (ศิษย์ปัจจุบันเข้าได้เลย ศิษย์เก่าต้องรออนุมัติ)
-    is_active_status = True if user.account_type == 'student' else False
-    
+    # 🟢 3. เช็คสถานะ: ถ้าเป็นศิษย์ปัจจุบันให้ใช้งานได้เลย ถ้าเป็นศิษย์เก่าให้รอตรวจสอบ
+    user_is_active = True if user.account_type == "student" else False
+
     new_user = models.User(
         name=user.name,
         email=user.email,
-        hashed_password=hashed_pwd,
+        hashed_password=hashed_pwd, 
         uni=user.uni,
         account_type=user.account_type,
         role="user",
-        is_active=is_active_status,
-        verification_document=user.verification_document
+        verification_document=user.verification_document,
+        is_active=user_is_active # 🟢 บันทึกสถานะลงฐานข้อมูล
     )
     
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    # 📦 4. เตรียมก้อนข้อมูลส่งกลับให้ Frontend (React)
-    response_data = {
+    # 🟢 4. ถ้าต้องรออนุมัติ ให้ส่งกลับไปแค่ user (ไม่ส่ง token)
+    if not user_is_active:
+        return {
+            "message": "Account created. Pending admin approval.", 
+            "user": {"id": new_user.id, "email": new_user.email}
+        }
+
+    # 🔑 5. ถ้าเป็น student ปกติ ก็สร้าง Token แล้วส่งกลับเหมือนเดิม
+    access_token = auth_utils.create_access_token(data={"sub": str(new_user.id)}) # หรือใช้อีเมลเป็น sub แล้วแต่ระบบคุณออกแบบไว้
+    
+    return {
+        "access_token": access_token, 
         "user": {
-            "id": new_user.id,
-            "name": new_user.name,
-            "email": new_user.email,
-            "uni": new_user.uni,
-            "role": new_user.role
+            "id": new_user.id, 
+            "name": new_user.name, 
+            "uni": new_user.uni
         }
     }
-
-    # 🔑 5. เฉพาะศิษย์ปัจจุบัน: สร้าง Token ส่งกลับไปเพื่อให้ Login อัตโนมัติทันที
-    if new_user.is_active:
-        access_token = auth_utils.create_access_token(data={"sub": new_user.email})
-        response_data["access_token"] = access_token
-        response_data["token_type"] = "bearer"
-
-    return response_data
-
+    
 @app.post("/api/login")
 def login(user_data: schemas.UserLogin, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == user_data.email).first()
@@ -127,7 +133,7 @@ def login(user_data: schemas.UserLogin, db: Session = Depends(get_db)):
     
     # เช็คสถานะการเปิดใช้งาน (สำหรับศิษย์เก่า)
     if not user.is_active:
-        raise HTTPException(status_code=403, detail="บัญชีของคุณอยู่ระหว่างการตรวจสอบโดยแอดมินครับ ⏳")
+        raise HTTPException(status_code=403, detail="บัญชีของคุณอยู่ระหว่างการตรวจสอบโดยแอดมิน")
     
     access_token = auth_utils.create_access_token(data={"sub": user.email})
     
@@ -275,20 +281,50 @@ async def get_notifications_count(user_id: int, db: Session = Depends(get_db)):
 # --- 🛡️ ระบบจัดการหลังบ้าน (Admin) ---
 
 @app.get("/api/admin/stats")
-async def get_admin_stats(db: Session = Depends(get_db)):
-    user_count = db.query(User).count()
-    product_count = db.query(Product).count()
-    message_count = db.query(Message).count()
-    # สถิติคำขออนุมัติศิษย์เก่า
-    pending_alumni = db.query(User).filter(User.account_type == 'alumni', User.is_active == False).count()
+def get_admin_stats(db: Session = Depends(get_db)):
+    total_users = db.query(models.User).count()
+    total_products = db.query(models.Product).count()
+    pending_alumni = db.query(models.User).filter(models.User.account_type == "alumni", models.User.is_active == False).count()
+    
+    # ดึงสถิติจำนวนสินค้าแยกตามหมวดหมู่
+    category_stats = db.query(
+        models.Product.category, 
+        func.count(models.Product.id).label('count')
+    ).group_by(models.Product.category).all()
+
+    # Mapping ชื่อหมวดหมู่ให้เป็นภาษาไทยสำหรับแสดงผลบนกราฟ
+    cat_map = {
+        "electronics": "ไอที/อิเล็กฯ",
+        "books": "หนังสือ",
+        "dorm": "ของใช้หอพัก",
+        "fashion": "แฟชั่น",
+        "sports": "กีฬา/งานอดิเรก",
+        "other": "อื่นๆ"
+    }
+    
+    # เตรียมข้อมูลสำหรับ Recharts
+    chart_data = []
+    for stat in category_stats:
+        cat_name = stat[0] or "other"
+        # ถ้าเป็นหมวดหมู่ย่อย (เช่น dorm-appliance) ให้จัดกลุ่มรวมเข้า dorm
+        display_name = cat_map.get(cat_name.split('-')[0], "อื่นๆ")
+        
+        # เช็คว่ามีกลุ่มนี้ใน list หรือยัง ถ้ามีให้บวกเพิ่ม ถ้าไม่มีให้สร้างใหม่
+        existing = next((item for item in chart_data if item["name"] == display_name), None)
+        if existing:
+            existing["value"] += stat[1]
+        else:
+            chart_data.append({"name": display_name, "value": stat[1]})
     
     return {
-        "totalUsers": user_count,
-        "totalProducts": product_count,
-        "totalMessages": message_count,
-        "pendingAlumni": pending_alumni
+        "summary": {
+            "total_users": total_users,
+            "total_products": total_products,
+            "pending_approvals": pending_alumni
+        },
+        "chart_data": chart_data
     }
-
+    
 @app.get("/api/admin/alumni-requests")
 async def get_alumni_requests(db: Session = Depends(get_db)):
     # ดึงรายชื่อศิษย์เก่าที่ยังไม่ได้รับอนุมัติ
@@ -340,7 +376,7 @@ async def upload_image(file: UploadFile = File(...)):
         return {"error": str(e)}
 
 # หมายเหตุ: คุณสามารถลบโค้ดส่วน os.makedirs(UPLOAD_DIR, exist_ok=True) 
-# และส่วน shutil ตัวเก่าทิ้งไปได้เลยครับ เพราะเราไม่ได้เก็บรูปลงโฟลเดอร์ static ในเครื่องแล้ว
+# และส่วน shutil ตัวเก่าทิ้งไปได้เลย เพราะเราไม่ได้เก็บรูปลงโฟลเดอร์ static ในเครื่องแล้ว
     
 @app.put("/api/users/{user_id}")
 async def update_user_profile(user_id: int, user_update: UserUpdate, db: Session = Depends(get_db)):
@@ -451,3 +487,65 @@ async def get_user_orders(user_id: int, db: Session = Depends(get_db)):
         return result
     except Exception as e:
         return {"error": str(e)}
+    
+# 🟢 API ตรวจสอบโควตาการลงขายสินค้าฟรี
+@app.get("/api/users/{user_id}/quota")
+async def get_user_quota(user_id: int, db: Session = Depends(get_db)):
+    try:
+        # นับจำนวนสินค้าทั้งหมดที่ User คนนี้เป็นคนลงขาย
+        post_count = db.query(models.Product).filter(models.Product.seller_id == user_id).count()
+        free_limit = 3 # โควตาฟรี 3 ชิ้น
+        remaining_free = max(0, free_limit - post_count)
+        
+        return {
+            "total_posts": post_count,
+            "remaining_free": remaining_free
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    
+    
+@app.get("/api/admin/stats")
+def get_admin_stats(db: Session = Depends(get_db)):
+    total_users = db.query(models.User).count()
+    pending_alumni = db.query(models.User).filter(models.User.account_type == "alumni", models.User.is_active == False).count()
+    total_products = db.query(models.Product).count()
+    sold_products = db.query(models.Product).filter(models.Product.status == "sold").count()
+    
+    # ดึงสถิติจำนวนสินค้าแยกตามหมวดหมู่ สำหรับทำกราฟ
+    category_stats = db.query(
+        models.Product.category, 
+        func.count(models.Product.id).label('count')
+    ).group_by(models.Product.category).all()
+    
+    chart_data = [{"name": c[0] if c[0] else "อื่นๆ", "value": c[1]} for c in category_stats]
+    
+    return {
+        "summary": {
+            "total_users": total_users,
+            "pending_approvals": pending_alumni,
+            "total_products": total_products,
+            "sold_products": sold_products
+        },
+        "chart_data": chart_data
+    }
+
+# 2. API ดึงรายชื่อศิษย์เก่าที่รออนุมัติ
+@app.get("/api/admin/pending-alumni")
+def get_pending_alumni(db: Session = Depends(get_db)):
+    users = db.query(models.User).filter(
+        models.User.account_type == "alumni",
+        models.User.is_active == False
+    ).all()
+    return users
+
+# 3. API กดอนุมัติศิษย์เก่า (Approve)
+@app.put("/api/admin/approve-alumni/{user_id}")
+def approve_alumni(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
+    
+    user.is_active = True
+    db.commit()
+    return {"message": "อนุมัติบัญชีสำเร็จ"}
