@@ -549,3 +549,27 @@ def approve_alumni(user_id: int, db: Session = Depends(get_db)):
     user.is_active = True
     db.commit()
     return {"message": "อนุมัติบัญชีสำเร็จ"}
+
+from sqlalchemy.exc import IntegrityError # 🟢 อย่าลืม import ตัวนี้ไว้ด้านบนสุดของไฟล์นะครับ
+
+@app.delete("/api/products/{product_id}")
+def delete_product(product_id: int, db: Session = Depends(get_db)):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="ไม่พบสินค้าในระบบ")
+
+    try:
+        # พยายามลบสินค้าออกจากระบบ (ถ้ายังไม่มีใครสั่งซื้อ จะลบได้ปกติ)
+        db.delete(product)
+        db.commit()
+        return {"message": "ลบสินค้าสำเร็จ"}
+        
+    except IntegrityError:
+        # 🟢 ถ้าลบไม่ได้ (เพราะมีคนสั่งซื้อแล้ว) ระบบจะกระโดดมาทำงานตรงนี้แทน
+        db.rollback() # เคลียร์คำสั่งลบที่พังทิ้งไป
+        
+        # เปลี่ยนสถานะเป็น 'unavailable' หรือ 'deleted' แทนการลบทิ้ง
+        product.status = 'unavailable' 
+        db.commit()
+        
+        return {"message": "ซ่อนสินค้าสำเร็จ (ไม่สามารถลบถาวรได้เนื่องจากมีประวัติการสั่งซื้อ)"}
